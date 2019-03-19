@@ -1,0 +1,85 @@
+
+###### DAILY PROMO SHEET - DAILY #####
+
+setwd("S:\\Marketing\\Daily Comp Demand\\Exports")
+library("RODBC", lib.loc="~/R/R-3.4.2/library")
+mycon <- odbcConnect("datamart", uid="xxxxxxx", pwd = xxxxxxxx)
+library("dplyr", lib.loc="~/R/R-3.4.2/library")
+library(readxl)
+
+#daily order type
+daily_orders <- sqlQuery(mycon, "select date_date, count(distinct(orig_order_num))[orders], sum(order_cost_dlrs)[cogs], sum(order_sold_dlrs)[dlrs], sum(order_units)[units], order_type_desc from hadm_fact_order
+  							inner JOIN hadm_customer on hadm_customer.cust_key=hadm_fact_order.cust_billto_key
+                          Inner join hadm_date_calendar on hadm_date_calendar.date_key=hadm_fact_order.date_key
+                          inner join hadm_order_type on hadm_order_type.order_type_key = hadm_fact_order.order_type_key
+                          where date_date between GETDATE()-2 and GETDATE() -1 and cust_type_code != 9 and not(order_type_desc IN ('Merchandise Exchange','Amazon','Outlet','retail mail order','retail counter sales'))
+                          group by  order_type_desc, date_date")
+
+daily_orders$order_type_desc <- ifelse(daily_orders$order_type_desc == 'store pickup', 'S2S', 'NON-S2S')
+
+daily_orders <- daily_orders  %>%
+  select(date_date, orders, cogs, dlrs, units, order_type_desc) %>%
+  group_by(date_date, order_type_desc) %>%
+  summarise(orders = sum(orders),cogs = sum(cogs),dlrs = sum(dlrs),units = sum(units))
+
+daily_orders  <- daily_orders[,c(1,3,5,6,4,2)]
+
+write.csv(daily_orders, "Daily_Orders.csv")
+
+
+
+#daily item pull
+daily_item_pull <- sqlQuery(mycon, "select date_date, product_style_code, product_color_code, product_dept_NH_desc, order_sold_dlrs, order_MSRP_dlrs, order_units, catalog_season_code, catalog_year, order_cost_dlrs from hadm_fact_order
+			                      INNER JOIN hadm_product on hadm_product.product_key = hadm_fact_order.product_key
+                            inner join hadm_order_type on hadm_order_type.order_type_key = hadm_fact_order.order_type_key
+                            Inner join hadm_date_calendar on hadm_date_calendar.date_key=hadm_fact_order.date_key
+                            inner join hadm_catalog on hadm_catalog.catalog_key = hadm_fact_order.catalog_key
+                            where date_date between GETDATE()-2 and GETDATE() -1 and not(order_type_desc IN ('Merchandise Exchange','Amazon','Outlet','retail mail order','retail counter sales'))")
+
+daily_item_pull$discount_bucket <- ifelse(1-daily_item_pull$order_sold_dlrs/daily_item_pull$order_MSRP_dlrs < .1, ' =<10%',
+                                          ifelse(1-daily_item_pull$order_sold_dlrs/daily_item_pull$order_MSRP_dlrs < .25, ' <=25%',
+                                                 ifelse(1-daily_item_pull$order_sold_dlrs/daily_item_pull$order_MSRP_dlrs < .35, ' <=35%',
+                                                        ifelse(1-daily_item_pull$order_sold_dlrs/daily_item_pull$order_MSRP_dlrs < .5, ' <=50%',
+                                                        " >50%"))))
+head(daily_item_pull2)
+daily_item_pull$style_color <- paste(daily_item_pull$product_style_code,"-",daily_item_pull$product_color_code, sep="")
+daily_item_pull$season_year <- paste(daily_item_pull$catalog_season_code,daily_item_pull$catalog_year, sep = "")
+daily_item_pull <- daily_item_pull[ ,c(1,2,12,4,13,5,6,7,11,10)]
+write.csv(daily_item_pull,"Daily_Items.csv")
+
+# Website Data
+library("googleAuthR", lib.loc="~/R/R-3.4.2/library")
+library("googleAnalyticsR", lib.loc="~/R/R-3.4.2/library")
+
+ga_auth()
+view_id <- 151953740
+
+
+## pulling in order data ##
+daily_device <- google_analytics(view_id,
+                                 date_range = c(Sys.Date() - 1, Sys.Date()-1),
+                                 dimensions = c("deviceCategory","date"),
+                                 metrics = c("sessions","transactions","transactionRevenue" ),
+                                 anti_sample = TRUE)
+write.csv(daily_device, "Daily_Web.csv")
+
+
+
+############ for adjusted report
+
+price_upload <- read_excel("//pdx-main/SHARE/Marketing/Daily Comp Demand/promo uploads/price_upload.xlsx")
+promo_combo <- merge(daily_item_pull, price_upload, by = 'style_color', all.x=TRUE)
+promo_combo[is.na(promo_combo)] <- 0
+
+promo_combo$status2 <- ifelse(promo_combo$season_year == 'SS2019' & promo_combo$STATUS == 0, 'regular price',
+                              ifelse(!(promo_combo$STATUS == 0), promo_combo$STATUS,
+                               'preseason clearance'))
+
+promo_combo_recap <- promo_combo %>%
+  select(date_date, status2, discount_bucket, order_sold_dlrs, order_cost_dlrs, order_MSRP_dlrs) %>%
+  group_by(date_date, status2, discount_bucket) %>%
+  summarise(dlrs = sum(order_sold_dlrs), COGS = sum(order_cost_dlrs), MSRP = sum(order_MSRP_dlrs), Margin = sum(order_sold_dlrs)-sum(order_cost_dlrs))
+
+promo_combo_recap2 <- promo_combo_recap[,c(1,4,3,2)]
+
+write.csv(promo_combo_recap2,"Promo_recap.csv")
